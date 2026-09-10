@@ -1,0 +1,93 @@
+name: Build Assistant preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch, tag or commit in Assistant-core
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: assistant-preview-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check source access is configured
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.ASSISTANT_CORE_TOKEN }}
+        run: |
+          if (-not $env:SOURCE_TOKEN) {
+            throw 'Configure ASSISTANT_CORE_TOKEN with read access to Assistant-core first.'
+          }
+      - uses: actions/checkout@v7
+        with:
+          repository: wibcoderge/Assistant-core
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.ASSISTANT_CORE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test source
+        run: python -m unittest discover -s tests -v
+      - name: Check syntax
+        run: python -m compileall -q assistant tests run_desktop.py
+      - name: Install packaging tool
+        run: python -m pip install -r requirements-build.txt
+      - name: Build Windows prototype
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name AssistantPrototype run_desktop.py
+      - name: Prepare assets and checksums
+        shell: pwsh
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = (Get-Content VERSION.txt -Raw).Trim()
+          if ($version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$') {
+            throw 'Only explicitly numbered alpha previews can be built by this workflow.'
+          }
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $name = "AssistantPrototype-$version-windows-x64.exe"
+          Copy-Item dist/AssistantPrototype.exe "release-assets/$name"
+          $sha = (Get-FileHash "release-assets/$name" -Algorithm SHA256).Hash.ToLower()
+          $bytes = (Get-Item "release-assets/$name").Length
+          "$sha  $name" | Set-Content release-assets/SHA256SUMS.txt -Encoding utf8
+          @{
+            schema_version = 1
+            version = $version
+            channel = 'alpha'
+            windows_x64 = @{
+              url = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$version/$name"
+              sha256 = $sha
+              size_bytes = $bytes
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content release-assets/update-manifest.json -Encoding utf8
+          @'
+          Диагностический Windows-прототип. Работают включение, отзыв доступа, тестовый запуск калькулятора и блокнота.
+
+          Голос, микрофон, разговорная модель и iOS-клиент ещё не подключены. Автообновление не реализовано.
+
+          Перед публикацией: проверить запуск EXE, обе тестовые команды, запрет команд после отзыва доступа и после выключения. Контрольные суммы приложены.
+          '@ | Set-Content release-assets/notes.md -Encoding utf8
+          "PREVIEW_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Create draft preview
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:PREVIEW_VERSION" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --title "Assistant $env:PREVIEW_VERSION — диагностический прототип" `
+            --notes-file release-assets/notes.md --draft --prerelease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $assets = Get-ChildItem release-assets -File | Where-Object Name -ne 'notes.md'
+          gh release upload "$env:PREVIEW_VERSION" --repo "$env:GITHUB_REPOSITORY" @($assets.FullName)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
