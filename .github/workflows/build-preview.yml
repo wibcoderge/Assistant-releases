@@ -19,6 +19,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Check source access is configured
         shell: pwsh
@@ -41,10 +42,12 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Check syntax
         run: python -m compileall -q assistant tests run_desktop.py
+      - name: Install CPU speech runtime
+        run: python -m pip install "torch>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu
       - name: Install packaging tool
-        run: python -m pip install -r requirements-build.txt
+        run: python -m pip install -r requirements-build.txt -r requirements-voice.txt
       - name: Build Windows prototype
-        run: python -m PyInstaller --noconfirm --onefile --windowed --name AssistantPrototype run_desktop.py
+        run: python -m PyInstaller --noconfirm --onefile --windowed --collect-all vosk --add-data "prompts/persona.ru.md:prompts" --name AssistantPrototype run_desktop.py
       - name: Prepare assets and checksums
         shell: pwsh
         env:
@@ -71,11 +74,11 @@ jobs:
             }
           } | ConvertTo-Json -Depth 4 | Set-Content release-assets/update-manifest.json -Encoding utf8
           @'
-          Диагностический Windows-прототип. Работают включение, отзыв доступа, тестовый запуск калькулятора и блокнота.
+          Локальная Windows-alpha: код диалога Ollama и голосового цикла Vosk → Ollama → Silero. Модели устанавливаются отдельно.
 
-          Голос, микрофон, разговорная модель и iOS-клиент ещё не подключены. Автообновление не реализовано.
+          Нужна проверка моделей, микрофона и звучания на целевом ПК. Полное управление ПК, iOS-клиент и автообновление не реализованы.
 
-          Перед публикацией: проверить запуск EXE, обе тестовые команды, запрет команд после отзыва доступа и после выключения. Контрольные суммы приложены.
+          Перед публикацией: проверить запуск EXE, текст, голос, обе команды, отзыв доступа и остановку речи. Инструкция: docs/windows-setup.md в закрытых исходниках. Контрольные суммы приложены.
           '@ | Set-Content release-assets/notes.md -Encoding utf8
           "PREVIEW_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Create draft preview
@@ -85,7 +88,7 @@ jobs:
         run: |
           gh release create "$env:PREVIEW_VERSION" `
             --repo "$env:GITHUB_REPOSITORY" `
-            --title "Assistant $env:PREVIEW_VERSION — диагностический прототип" `
+            --title "Assistant $env:PREVIEW_VERSION — локальная alpha" `
             --notes-file release-assets/notes.md --draft --prerelease
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $assets = Get-ChildItem release-assets -File | Where-Object Name -ne 'notes.md'
